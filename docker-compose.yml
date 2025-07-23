@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  factory_bot:
+    build: .
+    container_name: factory_bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - OPENROUTER_KEY=${OPENROUTER_KEY}
+      - TEXT_MODEL=${TEXT_MODEL:-gpt-4o-mini}
+      - VISION_MODEL=${VISION_MODEL:-gpt-4-vision-preview}
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env 
