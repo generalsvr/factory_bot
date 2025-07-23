@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"factory_bot/ai"
 	"factory_bot/config"
@@ -79,47 +80,95 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 	username := message.From.UserName
 	text := message.Text
 
+	// Log incoming message
+	logrus.WithFields(logrus.Fields{
+		"user_id":    userID,
+		"username":   username,
+		"first_name": message.From.FirstName,
+		"chat_id":    message.Chat.ID,
+		"message_id": message.MessageID,
+		"text_len":   len(text),
+	}).Info("📨 Incoming message")
+
 	// Store user and message in database
 	err := b.db.AddUser(userID, username, message.From.FirstName, message.From.LastName)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to store user")
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"user_id":  userID,
+			"username": username,
+		}).Error("❌ Failed to store user")
+	} else {
+		logrus.WithField("user_id", userID).Debug("✅ User stored successfully")
 	}
 
 	err = b.db.SaveMessage(userID, username, text, "user")
 	if err != nil {
-		logrus.WithError(err).Error("Failed to store message")
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"user_id":  userID,
+			"username": username,
+		}).Error("❌ Failed to store message")
+	} else {
+		logrus.WithField("user_id", userID).Debug("✅ Message stored successfully")
 	}
 
 	// Handle commands
 	if strings.HasPrefix(text, "/") {
+		logrus.WithFields(logrus.Fields{
+			"user_id": userID,
+			"command": strings.Split(text, " ")[0],
+		}).Info("Processing command")
 		b.handleCommand(message)
 		return
 	}
 
 	// Handle photo messages
 	if len(message.Photo) > 0 {
+		logrus.WithFields(logrus.Fields{
+			"user_id":     userID,
+			"photo_count": len(message.Photo),
+			"has_caption": message.Caption != "",
+			"caption_len": len(message.Caption),
+		}).Info("Processing image message")
 		b.handlePhoto(message)
 		return
 	}
 
 	// Process regular text message
+	logrus.WithFields(logrus.Fields{
+		"user_id":  userID,
+		"text_len": len(text),
+	}).Info("💬 Processing text message")
 	b.processUserMessage(message)
 }
 
 func (b *Bot) handleCommand(message *tgbotapi.Message) {
 	cmd := strings.Split(message.Text, " ")[0]
+	userID := message.Chat.ID
+
+	logrus.WithFields(logrus.Fields{
+		"user_id": userID,
+		"command": cmd,
+	}).Info("⚡ Executing command")
 
 	switch cmd {
 	case "/start":
-		b.sendMessage(message.Chat.ID, instructions.InitMessageEN)
+		b.sendMessage(userID, instructions.InitMessageEN)
+		logrus.WithField("user_id", userID).Info("🚀 Start command executed")
 	default:
-		b.sendMessage(message.Chat.ID, "Неизвестная команда. / Unknown command.")
+		b.sendMessage(userID, "Неизвестная команда. / Unknown command.")
+		logrus.WithFields(logrus.Fields{
+			"user_id": userID,
+			"command": cmd,
+		}).Warn("❓ Unknown command received")
 	}
 }
 
 func (b *Bot) handlePhoto(message *tgbotapi.Message) {
 	ctx := context.Background()
 	userID := message.Chat.ID
+	startTime := time.Now()
+
+	logrus.WithField("user_id", userID).Info("🖼️ Starting image processing")
 
 	// Send typing indicator
 	typing := tgbotapi.NewChatAction(userID, tgbotapi.ChatTyping)
@@ -132,24 +181,39 @@ func (b *Bot) handlePhoto(message *tgbotapi.Message) {
 		}
 		return "[Изображение без описания]"
 	}()
-
+	
 	err := b.db.SaveMessage(userID, message.From.UserName, imageText, "user")
 	if err != nil {
-		logrus.WithError(err).Error("Failed to store image message")
+		logrus.WithError(err).WithField("user_id", userID).Error("❌ Failed to store image message")
 	}
 
 	// Get the largest photo
 	photo := message.Photo[len(message.Photo)-1]
-
+	
+	logrus.WithFields(logrus.Fields{
+		"user_id":   userID,
+		"file_id":   photo.FileID,
+		"file_size": photo.FileSize,
+		"width":     photo.Width,
+		"height":    photo.Height,
+	}).Info("📋 Processing photo details")
+	
 	// Get file URL
 	file, err := b.api.GetFile(tgbotapi.FileConfig{FileID: photo.FileID})
 	if err != nil {
-		logrus.WithError(err).Error("Failed to get photo file")
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"user_id": userID,
+			"file_id": photo.FileID,
+		}).Error("❌ Failed to get photo file")
 		b.sendMessage(userID, "❌ Ошибка обработки изображения / Error processing image")
 		return
 	}
 
 	fileURL := file.Link(b.api.Token)
+	logrus.WithFields(logrus.Fields{
+		"user_id":  userID,
+		"file_url": fileURL,
+	}).Info("File URL obtained")
 
 	// Prepare messages for AI with image
 	messages := []openai.ChatCompletionMessage{
@@ -180,17 +244,33 @@ func (b *Bot) handlePhoto(message *tgbotapi.Message) {
 		},
 	}
 
+	logrus.WithFields(logrus.Fields{
+		"user_id": userID,
+		"model":   b.config.VisionModel,
+	}).Info("Sending image to AI model")
+
 	response, err := b.aiProvider.GenerateWithVision(ctx, messages, b.config.VisionModel, 1500)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to process image")
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"user_id": userID,
+			"model":   b.config.VisionModel,
+		}).Error("❌ Failed to process image with AI")
 		b.sendMessage(userID, "❌ Ошибка анализа изображения / Error analyzing image")
 		return
 	}
 
+	processingTime := time.Since(startTime)
+	logrus.WithFields(logrus.Fields{
+		"user_id":         userID,
+		"model":           b.config.VisionModel,
+		"response_length": len(response),
+		"processing_time": processingTime.String(),
+	}).Info("✅ Image processed successfully")
+
 	// Save bot response to database
 	err = b.db.SaveMessage(userID, b.api.Self.UserName, response, "assistant")
 	if err != nil {
-		logrus.WithError(err).Error("Failed to save bot response")
+		logrus.WithError(err).WithField("user_id", userID).Error("❌ Failed to save bot response")
 	}
 
 	b.sendMessage(userID, response)
@@ -200,6 +280,12 @@ func (b *Bot) processUserMessage(message *tgbotapi.Message) {
 	ctx := context.Background()
 	userID := message.Chat.ID
 	text := message.Text
+	startTime := time.Now()
+
+	logrus.WithFields(logrus.Fields{
+		"user_id":  userID,
+		"text_len": len(text),
+	}).Info("Starting text processing")
 
 	// Send typing indicator
 	typing := tgbotapi.NewChatAction(userID, tgbotapi.ChatTyping)
@@ -208,7 +294,12 @@ func (b *Bot) processUserMessage(message *tgbotapi.Message) {
 	// Get chat history (20 messages max)
 	history, err := b.db.GetChatHistory(userID, 20)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to get chat history")
+		logrus.WithError(err).WithField("user_id", userID).Error("❌ Failed to get chat history")
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"user_id":       userID,
+			"history_count": len(history),
+		}).Info("📚 Chat history retrieved")
 	}
 
 	// Prepare messages for AI with history
@@ -240,17 +331,35 @@ func (b *Bot) processUserMessage(message *tgbotapi.Message) {
 		Content: text,
 	})
 
+	logrus.WithFields(logrus.Fields{
+		"user_id":       userID,
+		"model":         b.config.TextModel,
+		"total_messages": len(messages),
+		"history_count": len(history),
+	}).Info("Sending text to AI model")
+
 	response, err := b.aiProvider.Generate(ctx, messages, b.config.TextModel, 1024)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to process message")
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"user_id": userID,
+			"model":   b.config.TextModel,
+		}).Error("❌ Failed to process message with AI")
 		b.sendMessage(userID, "❌ Ошибка обработки запроса / Error processing request")
 		return
 	}
 
+	processingTime := time.Since(startTime)
+	logrus.WithFields(logrus.Fields{
+		"user_id":         userID,
+		"model":           b.config.TextModel,
+		"response_length": len(response),
+		"processing_time": processingTime.String(),
+	}).Info("✅ Text processed successfully")
+
 	// Save bot response to database
 	err = b.db.SaveMessage(userID, b.api.Self.UserName, response, "assistant")
 	if err != nil {
-		logrus.WithError(err).Error("Failed to save bot response")
+		logrus.WithError(err).WithField("user_id", userID).Error("❌ Failed to save bot response")
 	}
 
 	b.sendMessage(userID, response)
@@ -258,6 +367,12 @@ func (b *Bot) processUserMessage(message *tgbotapi.Message) {
 
 func (b *Bot) sendMessage(chatID int64, text string) *tgbotapi.Message {
 	const maxMessageLength = 4096
+
+	logrus.WithFields(logrus.Fields{
+		"chat_id":     chatID,
+		"text_length": len(text),
+		"needs_split": len(text) > maxMessageLength,
+	}).Info("Sending message")
 
 	if len(text) <= maxMessageLength {
 		msg := tgbotapi.NewMessage(chatID, text)
@@ -267,20 +382,30 @@ func (b *Bot) sendMessage(chatID int64, text string) *tgbotapi.Message {
 		sent, err := b.api.Send(msg)
 		if err != nil {
 			// Retry without markdown if parsing fails
-			logrus.WithError(err).Warn("Markdown parsing failed, retrying as plain text")
+			logrus.WithError(err).WithField("chat_id", chatID).Warn("⚠️ Markdown parsing failed, retrying as plain text")
 			msg.ParseMode = ""
 			sent, err = b.api.Send(msg)
 			if err != nil {
-				logrus.WithError(err).Error("Failed to send message")
+				logrus.WithError(err).WithField("chat_id", chatID).Error("❌ Failed to send message")
 				return nil
 			}
 		}
 
+		logrus.WithFields(logrus.Fields{
+			"chat_id":    chatID,
+			"message_id": sent.MessageID,
+		}).Info("✅ Message sent successfully")
 		return &sent
 	}
 
 	// Split long message
 	parts := b.splitMessage(text, maxMessageLength)
+	logrus.WithFields(logrus.Fields{
+		"chat_id":    chatID,
+		"parts_count": len(parts),
+		"total_length": len(text),
+	}).Info("Splitting long message")
+
 	var lastMsg *tgbotapi.Message
 
 	for i, part := range parts {
@@ -291,14 +416,27 @@ func (b *Bot) sendMessage(chatID int64, text string) *tgbotapi.Message {
 		sent, err := b.api.Send(msg)
 		if err != nil {
 			// Retry without markdown if parsing fails
-			logrus.WithError(err).WithField("part", i+1).Warn("Markdown parsing failed for part, retrying as plain text")
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"chat_id": chatID,
+				"part":    i + 1,
+			}).Warn("⚠️ Markdown parsing failed for part, retrying as plain text")
 			msg.ParseMode = ""
 			sent, err = b.api.Send(msg)
 			if err != nil {
-				logrus.WithError(err).WithField("part", i+1).Error("Failed to send message part")
+				logrus.WithError(err).WithFields(logrus.Fields{
+					"chat_id": chatID,
+					"part":    i + 1,
+				}).Error("❌ Failed to send message part")
 				continue
 			}
 		}
+
+		logrus.WithFields(logrus.Fields{
+			"chat_id":    chatID,
+			"part":       i + 1,
+			"total_parts": len(parts),
+			"message_id": sent.MessageID,
+		}).Info("Message part sent")
 
 		lastMsg = &sent
 	}
