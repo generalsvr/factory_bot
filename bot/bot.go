@@ -35,6 +35,14 @@ func New(cfg *config.Config) (*Bot, error) {
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
 	}
 
+	// Clear chat history on startup
+	err = db.ClearAllChatHistory()
+	if err != nil {
+		logrus.WithError(err).Warn("Failed to clear chat history on startup")
+	} else {
+		logrus.Info("Chat history cleared on startup")
+	}
+
 	// Initialize AI provider
 	aiProvider := ai.NewProvider(cfg.OpenRouterKey)
 

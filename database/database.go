@@ -124,6 +124,12 @@ func (d *Database) GetDailyStats() (int, error) {
 	return count, err
 }
 
+func (d *Database) ClearAllChatHistory() error {
+	query := `DELETE FROM messages`
+	_, err := d.db.Exec(query)
+	return err
+}
+
 func (d *Database) Close() error {
 	return d.db.Close()
 }
