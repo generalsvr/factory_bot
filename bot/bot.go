@@ -261,12 +261,19 @@ func (b *Bot) sendMessage(chatID int64, text string) *tgbotapi.Message {
 
 	if len(text) <= maxMessageLength {
 		msg := tgbotapi.NewMessage(chatID, text)
+		// Try markdown first, fallback to plain text
 		msg.ParseMode = tgbotapi.ModeMarkdown
 
 		sent, err := b.api.Send(msg)
 		if err != nil {
-			logrus.WithError(err).Error("Failed to send message")
-			return nil
+			// Retry without markdown if parsing fails
+			logrus.WithError(err).Warn("Markdown parsing failed, retrying as plain text")
+			msg.ParseMode = ""
+			sent, err = b.api.Send(msg)
+			if err != nil {
+				logrus.WithError(err).Error("Failed to send message")
+				return nil
+			}
 		}
 
 		return &sent
@@ -278,12 +285,19 @@ func (b *Bot) sendMessage(chatID int64, text string) *tgbotapi.Message {
 
 	for i, part := range parts {
 		msg := tgbotapi.NewMessage(chatID, part)
+		// Try markdown first, fallback to plain text
 		msg.ParseMode = tgbotapi.ModeMarkdown
 
 		sent, err := b.api.Send(msg)
 		if err != nil {
-			logrus.WithError(err).WithField("part", i+1).Error("Failed to send message part")
-			continue
+			// Retry without markdown if parsing fails
+			logrus.WithError(err).WithField("part", i+1).Warn("Markdown parsing failed for part, retrying as plain text")
+			msg.ParseMode = ""
+			sent, err = b.api.Send(msg)
+			if err != nil {
+				logrus.WithError(err).WithField("part", i+1).Error("Failed to send message part")
+				continue
+			}
 		}
 
 		lastMsg = &sent
